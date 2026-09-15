@@ -192,6 +192,11 @@ higher rate.
     than the 3+1=4 that would match the withdraw-side shape, and which oracle besides the removed
     acceptance was covering the other mutants in that set. Do not read "6" as a validated
     mechanism until that gap is closed.
+    ⚠️ **Stale reference (2026-09-15):** the `advance_day requires #1 Lapsed->…` swap named above
+    no longer exists as such — the "Oracle mechanism review" section below removed the dead
+    `and claim[c].st != Lapsed` conjunct it targeted. This does not close the "why 6, not 4" gap;
+    it only means that specific mutant target is gone, and any re-run of this AC-8..10 deletion
+    experiment would need to be redone against the current file to mean anything.
 
 ### Survivor breakdown (per-mutant, from reading `S/claims_S.fsl`; not re-verified by mutate re-run)
 
@@ -259,21 +264,182 @@ targets (`type_bound_*` on `Amount`, `receive requires #2` = `a > 0`, `init assi
 equivalent-at-this-layer, but that has not been checked mutant-by-mutant the way S was. List them
 as **未分類 (unclassified)**, not equivalent.
 
+## Oracle mechanism review (2026-09-15)
+
+An independently reviewed manual injection — append one extra disjunct to `lapse`'s stage guard
+(`or claim[c].st == <Member>`), touching nothing else — found that six of the eighteen `forbidden`
+scenarios in `S`/`M` read as guarding against a post-payment `lapse`, but only one of them
+(`FB-8`) actually did. This is exactly the failure mode AGENTS.md names: *"a preservation control
+presented as a detector is a false coverage claim."* Note that this exact mutation shape (widen a
+guard by adding a disjunct, removing nothing) is not one `fslc mutate`'s builtin operators
+generate — every builtin `enum_constant_swap` *replaces* a literal, so it always removes an
+existing disjunct too, which the `AC-*` witnesses already catch. `fslc mutate`'s kill-rate would
+not have surfaced this defect at any depth or cap; it took a manually crafted mutation outside the
+tool's own operator catalog.
+
+### What was broken and why
+
+`lapse`'s guard is `st == Intake or … or Reassessment` plus a separate `requires days >=
+LAPSE_AFTER`. Widening the first guard to also admit `Approved` is caught by `FB-8` ("Lapse from
+an approved claim after waiting is rejected": `receive, assess, advance_day×3, lapse`) because
+`FB-8` reaches `days == LAPSE_AFTER` before calling `lapse`, so the stage guard is the *only*
+remaining reason `lapse` could be rejected. Widening the same guard to admit `Paid` or `Posted`
+was **not** caught by anything:
+
+- `FB-5`/`FB-11`/`FB-12` ("Lapse from an approved/paid/posted claim is rejected") call `lapse`
+  immediately, at `days == 0`. The `days >= LAPSE_AFTER` guard alone already rejects the call, so
+  these three scenarios pass regardless of what the stage guard admits — they test only the day
+  guard, not what their titles claim.
+- `FB-13`/`FB-14` ("… after waiting is rejected") do reach `days == LAPSE_AFTER` before calling
+  `lapse`, matching `FB-8`'s shape. They still didn't catch the widened guard, for a different
+  reason, confirmed by a second injection (remove `invariant LedgerConsistent`, keep the
+  `Paid` widening): with `LedgerConsistent` present, widening `Paid` into `lapse`'s guard on
+  `S/claims_S.fsl` reports `check` → `{"result":"ok"}`; with `LedgerConsistent` also removed, the
+  identical widened guard reports `check` → `{"result":"error","kind":"forbidden","id":"FB-13", "accepted_step":6,...}`.
+  `FB-13`'s apparent "reject" was `LedgerConsistent` tripping on the unrelated `paid` counter after
+  `lapse` succeeded from `Paid`, not the stage guard doing its job. Per AGENTS.md's own rule on
+  comparison scope, this was measured rather than asserted from the reviewer's description of the
+  mechanism.
+
+### Fixes applied (S and M; identical structure in both, verified separately in both)
+
+| id | fix | why |
+|---|---|---|
+| `FB-5` | **deleted** | see "`FB-5` vs `FB-8`" below — it turned out to be a duplicate, not a fix target |
+| `FB-11` | insert `advance_day(0)` ×3 before `pay(0)` | forces `days >= LAPSE_AFTER` so only the stage guard can still reject the call |
+| `FB-12` | insert `advance_day(0)` ×3 before `pay(0)` | same reason, for the posted-claim scenario |
+| `FB-9`'s masked conjunct | removed `and claim[c].st != Lapsed` from `advance_day`'s guard | provably dead: `invariant LapsedMeetsWaitingPeriod` guarantees `days >= LAPSE_AFTER` whenever `st == Lapsed`, so `requires days < LAPSE_AFTER` already rejects `advance_day` on a `Lapsed` claim regardless of this conjunct. Widening `Day`'s upper bound (the other option raised) does **not** fix this — the invariant ties `Lapsed` to `days >= LAPSE_AFTER` independent of `Day`'s own ceiling, so the conjunct stays dead either way. Deletion is behavior-preserving by this argument, not merely because a mutation survived |
+| `FB-13`, `FB-14` | replaced with `trans LapseNotFromPaid` / `trans LapseNotFromPosted` (`old(claim[c].st) == Paid/Posted => claim[c].st != Lapsed`) | `forbidden`'s `expect rejected` cannot distinguish "the guard rejected it" from "an unrelated invariant broke afterward" (confirmed above); a `trans` states the actual two-state safety property directly, independent of `LedgerConsistent` |
+
+### `FB-5` vs `FB-8`: deleted, not fixed
+
+Applying the "insert `advance_day×3`" fix to `FB-5` (as first done in this pass) made it
+**byte-identical in body to `FB-8`**: both reduce to `receive, assess, advance_day×3, lapse,
+expect rejected`. This is a direct consequence of the domain bounds (`LAPSE_AFTER = 3 = Day`'s
+ceiling — there is no shorter trace that reaches `days >= LAPSE_AFTER`), not a mistake in applying
+the fix. Two IDs, one claimed check — this is the same class of problem as the masking above:
+inflating the apparent oracle count. When the widened-guard injection was run against the merged
+result, `FB-5` (declared first) is what actually reported the violation, not `FB-8` — declaration
+order, not the title's claimed mechanism ("after waiting"), decided which ID "caught" it. **`FB-5`
+has been deleted from `S/claims_S.fsl` and `M/claims_M.fsl`; `FB-8` is kept**, because its title
+names the actual mechanism (the waiting period) that makes the scenario a real detector. This
+removes zero properties: it was one property counted under two IDs. `L/claims_L_requirements.fsl`
+is untouched — it has no `FB-8`, so its `FB-5` is not a duplicate of anything there.
+
+⚠️ **The new `trans` properties need `--depth 7` (`LapseNotFromPaid`) and `--depth 8`
+(`LapseNotFromPosted`) to fire** — reaching `Paid`/`Posted` before `lapse` takes 7/8 actions
+respectively, one/two more than `FB-8`'s 6-action trace. `fslc mutate`'s own `--depth 6` default
+doesn't need to change: none of its builtin operators produce the "widen, remove nothing" mutation
+shape that needs the extra depth (confirmed: the `enum_constant_swap` mutants on `lapse`'s
+existing four literals that *do* touch `Paid`/`Posted` are already killed at depth 6, via the
+`AC-*` witnesses, since a builtin swap always removes a literal too).
+
+⛔ **Neither `check` nor the standard `verify --depth 6` exercises the two new `trans`
+properties at all** — `trans`/`invariant` safety is checked by the BMC search inside `verify`, up
+to whatever `--depth` is given; a `forbidden` scenario is a literal, depth-independent trace
+replay (that's why `+Approved` fails `check` with no `--depth` flag — `FB-8` doesn't need BMC).
+`--depth 8` is required, not merely helpful. **`rust/fslc/tests/corpus_check_sweep.rs`, the CI job
+that walks this corpus, only runs `check` (line ~102) and `verify --depth 2 --deadlock ignore
+--engine bmc` (lines ~128-134) — depth 2, not 8.** No CI gate in this repository currently
+exercises `LapseNotFromPaid`/`LapseNotFromPosted`. This is not a claim that the fix is wrong: the
+property is correctly stated and `verify --depth 8` (below) does detect a violation of it. It is a
+claim about what *is* and *is not* covered by an automated gate today, stated because the whole
+point of this pass was not repeating exactly this gap.
+
+### Before → after (isolated injection: `check`/`verify`, exact `kind`/`id`/exit code, not summarized)
+
+Injection: append ` or claim[c].st == <Member>` to `lapse`'s stage guard's second line, one member
+at a time, nothing else touched. Reverted before the next; final `git diff` empty (see closing
+section). Exit codes: `forbidden`/`type` `error` results exit 2; `trans` `violated` and
+refinement `refinement_failed`/`impl_violated` results exit 1; clean results exit 0.
+
+**`S/claims_S.fsl`, before this fix:**
+
+| member | `check` | `verify --depth 6` | `verify --depth 8` |
+|---|---|---|---|
+| `Approved` | exit 2, `{"result":"error","kind":"forbidden","id":"FB-8"}` | same | same |
+| `Paid` | exit 0, `{"result":"ok"}` | exit 0, `{"result":"verified"}` | exit 0, `{"result":"verified"}` |
+| `Posted` | exit 0, `{"result":"ok"}` | exit 0, `{"result":"verified"}` | exit 0, `{"result":"verified"}` |
+
+**`S/claims_S.fsl`, after this fix (`FB-5` deleted, `FB-8` kept):**
+
+| member | `check` | `verify --depth 6` | `verify --depth 8` |
+|---|---|---|---|
+| `Approved` | exit 2, `{"result":"error","kind":"forbidden","id":"FB-8"}` (unchanged) | same | same |
+| `Paid` | **exit 0, `{"result":"ok"}` — unchanged** | **exit 0, `{"result":"verified"}` — unchanged** | exit 1, `{"result":"violated"}` (property `LapseNotFromPaid`) |
+| `Posted` | **exit 0, `{"result":"ok"}` — unchanged** | **exit 0, `{"result":"verified"}` — unchanged** | exit 1, `{"result":"violated"}` (property `LapseNotFromPosted`) |
+
+`check` and `verify --depth 6` produce the identical output before and after this fix for
+`Paid`/`Posted` — the fix is real but only reachable at `--depth 8`, which is not what `check` or
+the CI gate run (see above).
+
+**`M/claims_M.fsl`**: identical shape before and after (verified separately, not inferred from
+S): before, `Approved`→`FB-8` error (exit 2), `Paid`/`Posted`→`ok`/`verified` (exit 0) at every
+depth tried; after, `Approved`→`FB-8` unchanged, `Paid`/`Posted`→`violated` (exit 1) only at
+`--depth 8`, unchanged (`ok`/`verified`, exit 0) at `check` and `--depth 6`.
+
+**`L/claims_L_requirements.fsl`**: a *different* mechanism already caught `Paid`/`Posted`, even
+before this fix, because `claims_L_requirements.fsl` carries an inline
+`implements InsuranceClaimBusiness from "claims_L_business.fsl"`. Before this fix: `Approved` →
+exit 1, `{"result":"refinement_failed"}` (not `FB-8` — this tier has no `FB-8`); `Paid`/`Posted` →
+exit 1, `{"result":"impl_violated"}` in both cases, from plain `check` (not depth-dependent — the
+`implements` check runs as part of `check`/`verify` regardless of `--depth`, unlike the `trans`
+case above). `FB-5` itself was still masked exactly like `S`/`M` (same guard shape), but the
+business layer's `lapse` action independently excludes post-payment stages, so the refinement
+check catches what `FB-5` alone does not. After applying the same `FB-5` fix (insert
+`advance_day×3`; **no `FB-8` twin exists in `L`, so `FB-5` here is kept, not deleted**): `Approved`
+→ exit 2, `{"result":"error","kind":"forbidden","id":"FB-5"}` directly; `Paid`/`Posted` →
+unchanged, still caught via `impl_violated` at exit 1. No `trans` properties were added to `L` —
+`FB-13`/`FB-14` don't exist there, and the refinement path is already a working, non-coincidental,
+depth-independent detector for that half of the property (see the business-layer section below for
+how this direction of refinement differs from the one that doesn't help).
+
+### Mutate kill-rate, before → after this fix
+
+| spec | before | after |
+|---|---|---|
+| `S/claims_S.fsl` | total=331 killed=299 survived=32 kill_rate=0.9033 | total=322 killed=293 survived=29 kill_rate=0.9099 |
+| `M/claims_M.fsl` | total=342 killed=304 survived=38 kill_rate=0.8889 | total=333 killed=298 survived=35 kill_rate=0.8949 |
+| `L/claims_L_requirements.fsl` | total=342 killed=276 survived=66 kill_rate=0.8070 | total=342 killed=278 survived=64 kill_rate=0.8129 |
+
+All six runs: `--depth 6 --max-mutants 400`, `notes` has no `mutant cap … dropped` line, and
+`summary.total < 400` in every case. `total` drops slightly for S/M because deleting `FB-9`'s dead
+conjunct removes a few mutation targets from `advance_day`'s guard; no run shows a survivor count
+increase, i.e. no regression from any of the fixes above. Deleting `FB-5` changed nothing in these
+numbers (re-measured: S and M both reproduce the identical total/killed/survived/kill_rate shown
+in the "after" column) — `forbidden`/`acceptance` scenario bodies are not `mutate` targets
+themselves, only the declarations (`type`/`const`/`init`/`action`) they exercise are.
+
+### `--depth 8` cost (S and M, `/usr/bin/time -l`, sequential runs, not parallel)
+
+| spec | wall | maximum resident set size |
+|---|---|---|
+| `S/claims_S.fsl` | 0.17s | 8,732,672 bytes (~8.3 MB) |
+| `M/claims_M.fsl` | 0.17s | 8,781,824 bytes (~8.4 MB) |
+
+`M` carries an inline `implements` (see issue #1041 for where that path gets expensive at larger
+domains), but at this corpus's bound (`ClaimId = 0..1`) the `--depth 6`→`8` bump costs nothing
+measurable over `S`; both stayed under 9 MB.
+
 ## Commands (S tier)
 
 ```bash
 fslc check examples/claims/S/claims_S.fsl
-fslc verify examples/claims/S/claims_S.fsl --depth 6
+fslc verify examples/claims/S/claims_S.fsl --depth 8
 fslc check examples/claims/S/negative/pay_before_assessment.fsl
 fslc mutate examples/claims/S/claims_S.fsl --depth 6 --max-mutants 400
 # inspect stdout JSON: summary.kill_rate AND notes[] (no cap-drop line)
 ```
 
+`--depth 8`, not the historical `--depth 6`: `trans LapseNotFromPaid`/`LapseNotFromPosted` (see
+"Oracle mechanism review" above) need 7/8 steps to reach a violation; 8 is a strict superset of 6
+for every other property in this file.
+
 ## Commands (M tier)
 
 ```bash
 fslc check examples/claims/M/claims_M.fsl
-fslc verify examples/claims/M/claims_M.fsl --depth 6
+fslc verify examples/claims/M/claims_M.fsl --depth 8
 fslc check examples/claims/M/claims_ledger_db.fsl
 fslc check examples/claims/M/claims_M_design.fsl
 fslc check examples/claims/M/negative/design_pay_bypass.fsl
@@ -310,8 +476,17 @@ fslc check examples/claims/L/claims_L_saga.fsl
 fslc check examples/claims/L/negative/design_pay_bypass.fsl
 fslc chain examples/claims/L/fsl-project.toml   # business/requirements/design depth=6
 fslc mutate examples/claims/L/claims_L_business.fsl --depth 6 --max-mutants 400
+fslc mutate examples/claims/L/claims_L_requirements.fsl --depth 6 --max-mutants 400
+fslc mutate examples/claims/L/claims_L_design.fsl --depth 6 --max-mutants 400
+fslc mutate examples/claims/L/claims_L_saga.fsl --depth 6 --max-mutants 2000
 # inspect stdout JSON: summary.kill_rate AND notes[] (no cap-drop line)
 ```
+
+`claims_L_requirements.fsl`'s `FB-5` was fixed the same way as `S`/`M` (see "Oracle mechanism
+review" above); unlike `S`/`M`, no `trans` properties were added here, because `Paid`/`Posted`
+lapse is already independently caught by this file's inline `implements` refinement against
+`claims_L_business.fsl` (`impl_violated`) — a real, non-coincidental detector, not a masking
+artifact (see the business-layer correction below for why that direction of refinement works).
 
 Design→requirements refinement lives in `claims_L_design_refines_requirements.fsl`
 (external mapping, not `fslc check` on its own). Requirements→business uses inline
@@ -322,7 +497,7 @@ for chain documentation.
 
 | spec | total | killed | survived | kill_rate | oracle |
 |---|---:|---:|---:|---:|---|
-| `claims_L_requirements.fsl` | 342 | 276 | 66 | 0.8070 | invariant ×2, forbidden ×5, acceptance ×4 |
+| `claims_L_requirements.fsl` | 342 | 278 | 64 | 0.8129 | invariant ×2, forbidden ×5, acceptance ×4 |
 | `claims_L_design.fsl` | 341 | 153 | 188 | **0.4487** | invariant ×2, acceptance ×1 |
 | `claims_L_business.fsl` | 188 | 39 | 149 | **0.2074** | `reachable` ×1 |
 | `claims_L_saga.fsl` | 110 | 2 | 108 | 0.0182 | `saga` ×1 (`domain` dialect — see the ~10% scope note above) |
@@ -353,22 +528,48 @@ surviving path satisfies it — grouped by action and op:
 (This grouping is coarser than S's individual per-mutant classification; per the request,
 group-level is sufficient here.)
 
-This tier's actual property assurance for the business layer is the refinement checks below
-(business is the abstraction `claims_L_requirements.fsl` refines), not this file's own mutate
-score. **This "structural, not an oracle gap" reading is this corpus's own analysis** (backed by
-the mutate re-run above and by reading the spec's single `reachable` property); **it has not been
-independently confirmed by the orchestrator the way the ~10%-domain-dialect finding was.**
-**Do not add invariants/forbidden/acceptance to this file to raise the number** — the properties
-already live at the requirements layer (FB-1..18/AC-1..10 in the S/M/L requirements files), and
-duplicating them here would be an unverified-until-calibrated addition of exactly the kind the
-project is currently declining to make.
+⛔ **Correction (2026-09-15): the previous version of this paragraph claimed the refinement checks
+below compensate for this file's thin oracle set. That claim was wrong, and a reviewer disproved
+it.** `claims_L_business.fsl` is the *abstract* side of the `requirements → business` refinement
+(`claims_L_requirements.fsl` is the implementation, `claims_L_business.fsl` the abstraction it is
+checked against). Loosening the *abstract* side of a refinement only ever makes the refinement
+**easier** to satisfy — a more permissive abstraction admits a superset of what the concrete side
+already does — so nothing downstream can detect the abstraction itself being hollowed. Measured
+directly: widen `claims_L_business.fsl`'s `lapse` guard to also admit `BPaid` (mirroring the
+`FB-`/`trans` defect above, but in the business layer) and:
 
-`claims_L_design.fsl`'s 0.4487 is thinner than `claims_L_requirements.fsl`'s 0.8070 — 2
-invariants and 1 acceptance versus 2 invariants, 5 forbidden, and 4 acceptance. That comparison
-(design carries less of its own oracle density than requirements, with the difference made up by
-`fslc refine`/`fslc chain` showing design refines requirements) is this corpus's own reading of
-the numbers, not something the orchestrator independently verified. No oracle was added here
-either.
+```
+$ fslc check claims_L_business.fsl              # standalone
+{"result": "ok", ...}
+$ fslc refine claims_L_requirements.fsl claims_L_business.fsl \
+    claims_L_requirements_refines_business.fsl --depth 6
+{"result": "refines", ...}
+$ fslc chain fsl-project.toml                    # the whole L-tier pipeline
+{"result": "verified", ...}   # requirements layer's embedded `implements` also reports "refines"
+```
+
+Every check in the pipeline still passes with the hollowed business layer. **This tier's actual
+property assurance for the business layer is this file's own oracles (or lack of them) — not the
+refinement checks**, because business sits on the side of the refinement relationship that
+refinement cannot validate. This is a materially different situation from `claims_L_design.fsl`
+below, where the direction of refinement does provide real assurance.
+
+**This does not change the "do not add oracles" instruction**: the 149 survivors are still not
+being used to justify adding `invariant`/`forbidden`/`acceptance` here — the properties already
+live at the requirements layer (FB-1..18/AC-1..10 in the S/M/L requirements files) — but the
+justification for leaving business thin is now stated correctly: it is an accepted gap in what
+this corpus's checks can catch for the business layer specifically, not a gap that refinement
+happens to cover.
+
+`claims_L_design.fsl`'s 0.4487 is thinner than `claims_L_requirements.fsl`'s 0.8129 — 2
+invariants and 1 acceptance versus 2 invariants, 5 forbidden, and 4 acceptance. Unlike business,
+this direction of refinement (`design → requirements`, design is the *implementation*) is a real
+detector for design-layer defects that affect observable behavior: if design permitted a
+transition requirements forbids (e.g. one of `FB-1..5`), `fslc refine`/`fslc chain` would report
+`refinement_failed`, because design is being checked *against* a well-oracled requirements, not
+the reverse. This was not re-verified by a loosening experiment in this pass (only the business
+direction was, per the reviewer's specific finding); treat the design claim as consistent with the
+general refinement-direction argument above, not as independently measured the same way.
 
 **Mutate reporting (required):** raise `--max-mutants` until `notes` contains **no**
 `mutant cap … dropped` line (default 200 truncates late actions such as `lapse`;

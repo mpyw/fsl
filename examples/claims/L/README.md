@@ -61,3 +61,23 @@ fslc refine examples/claims/L/claims_L_design.fsl \
   examples/claims/L/claims_L_requirements.fsl \
   examples/claims/L/claims_L_design_refines_requirements.fsl --depth 6
 ```
+
+### Fault injection: both mapping files do detect a broken mapping
+
+The refinement checks above only establish that these two mappings currently pass; that is not
+the same as showing they would catch a broken one. Each mapping file was fault-injected once,
+in an isolated copy, and reverted (real content unchanged; see `git diff` below):
+
+- `claims_L_requirements_refines_business.fsl`: changed `action receive(c, a) -> intake(c)` to
+  `-> approve(c)`. `fslc refine` on the mutated copy: `{"result": "refinement_failed",
+  "kind": "abs_requires_failed", "violated_at_step": 1, ...}`.
+- `claims_L_design_refines_requirements.fsl`: changed `action pay_submit(c) -> pay(c)` to
+  `-> withdraw(c)`. `fslc refine` on the mutated copy: `{"result": "refinement_failed",
+  "kind": "abs_requires_failed", "violated_at_step": 3, ...}`.
+
+Both mechanisms work correctly for what they actually check — a mapping that sends an
+implementation action to the wrong abstract action is caught. What they do **not** and cannot
+check is whether the *abstract* side's own guards are hollow (see the business-layer correction
+in the main `examples/claims/README.md`) — that is a different question from "is this mapping
+wired correctly," and the fault injection above only speaks to the latter.
+```

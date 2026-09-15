@@ -149,6 +149,9 @@ requirements InsuranceClaimL {
   forbidden FB-5 "Lapse from an approved claim is rejected" {
     receive(0, 1)
     assess(0)
+    advance_day(0)
+    advance_day(0)
+    advance_day(0)
     lapse(0)
     expect rejected
   }
