@@ -201,8 +201,8 @@ requirements InsuranceClaimM {
     expect rejected
   }
 
-  // `forbidden` + `expect rejected` cannot tell "the guard rejected it" from "an unrelated
-  // invariant broke afterward": FB-13/FB-14 used to live here but passed only because
+  // `forbidden` + `expect rejected` cannot separate two outcomes: the guard rejected the
+  // call, or an unrelated invariant broke afterward. FB-13/FB-14 used to live here but passed only because
   // `LedgerConsistent` tripped, not the stage guard (measured: remove `LedgerConsistent`
   // and the old `forbidden` reports the violation). `trans` states the transition itself,
   // independent of `LedgerConsistent`. Needs `verify --depth 8` to reach the violation.
