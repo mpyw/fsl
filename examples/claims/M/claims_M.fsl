@@ -81,6 +81,10 @@ requirements InsuranceClaimM {
     fair action advance_day(c: ClaimId) {
       requires claim[c].st != Paid and claim[c].st != Posted
         and claim[c].st != Withdrawn
+      // `and claim[c].st != Lapsed` was removed here: unreachable. `Lapsed` implies
+      // `days == LAPSE_AFTER` (see `LapsedMeetsWaitingPeriod` below), so the guard just
+      // below already rejects `advance_day` on a `Lapsed` claim. Widening `Day`'s upper
+      // bound would not revive this conjunct — the invariant ties the two regardless of bound.
       requires claim[c].days < LAPSE_AFTER
       claim[c].days = claim[c].days + 1
     }
@@ -142,6 +146,9 @@ requirements InsuranceClaimM {
     expect rejected
   }
 
+  // `FB-5` used to sit here with the same title minus "after waiting"; once its masking
+  // was fixed it became byte-identical to this trace (one property, two ids), so it was
+  // deleted rather than kept as a duplicate.
   forbidden FB-8 "Lapse from an approved claim after waiting is rejected" {
     receive(0, 1)
     assess(0)
@@ -194,6 +201,11 @@ requirements InsuranceClaimM {
     expect rejected
   }
 
+  // `forbidden` + `expect rejected` cannot tell "the guard rejected it" from "an unrelated
+  // invariant broke afterward": FB-13/FB-14 used to live here but passed only because
+  // `LedgerConsistent` tripped, not the stage guard (measured: remove `LedgerConsistent`
+  // and the old `forbidden` reports the violation). `trans` states the transition itself,
+  // independent of `LedgerConsistent`. Needs `verify --depth 8` to reach the violation.
   trans LapseNotFromPaid "FB-13 replacement: lapse can never fire out of a paid stage" {
     forall c: ClaimId {
       old(claim[c].st) == Paid => claim[c].st != Lapsed
