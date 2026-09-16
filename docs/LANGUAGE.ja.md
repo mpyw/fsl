@@ -773,7 +773,7 @@ until  Name { P until Q }    // unless safety plus a leadsTo P ~> Q progress obl
 ## 7. 検証器 `fslc`
 
 ```
-fslc check     <file.fsl>                        # syntax / names / types only (fast)
+fslc check     <file.fsl>                        # syntax / names / types, and an inline implements block (depth-bounded, no Z3)
 fslc lint      <path>... [--edition current|next] [--project fsl-project.toml] # edition + ID-policy diagnostics; never mutates
 fslc migrate   <path>... --edition next [--write] # dry-run edits; --write applies validated set
 fslc fmt       <file.fsl|-> [--edition current|next] # canonical FSL to stdout; never mutates input
@@ -1008,8 +1008,8 @@ refinement_failed / impl_violated / sweep_failed / observed_mismatch、
 inline `implements` が top-level `result` へ伝播するため列挙しています。畳み込みは検証封筒を
 生成する場所で起きるので、`check` / `verify` に閉じません。seam が失敗する spec では、`mutate` は
 baseline の verdict をそのまま返し(baseline が `verified` でなくなるため変異を1つも生成しません)、
-`ledger` は同じ exit を引き継ぎ、`sweep` は `sweep_failed` を返します。`fslc html` は畳み込まれた
-封筒を埋め込みます(exit code は変わりません)。同じ `2` の
+`ledger` と `fslc html` は畳み込まれた検証封筒から同じ exit を引き継ぎ、`sweep` は
+`sweep_failed` を返します。同じ `2` の
 対応付けは `chain` のプロジェクトマニフェストリーダー(未知のセクション、認識できる
 セクションが0個、パース不能な `depth`/`refine_depth` — `docs/DESIGN-layers.md` §7)
 と、`ledger --impl-log` の replay 入力(replay エラーは実装ログの証跡ではなく、
@@ -1033,7 +1033,7 @@ baseline の verdict をそのまま返し(baseline が `verified` でなくな�
 | `violated` | 反例が存在する。`violation_kind` と最短トレースつき | トレースを読んで spec を直す |
 | `reachable_failed` | reachable が深さ K 以内に到達されなかった | 各 `unreached[].classification` を読む: `insufficient_depth` なら `--depth` を上げ、`over_constrained` ならブロックしている制約を直す |
 | `unknown_cti` | invariant は違反されないが帰納的でない | **CTI を読んで補助 invariant を追加する**(§8)か、`--engine explicit` を試す(closure はレンマなしで証明する) |
-| `unknown_budget` | `--engine explicit` が閉じる前に `--explicit-budget` を超えた | 予算を上げるか、この spec には `--engine bmc`/`induction` を使う |
+| `unknown_budget` | いずれか: `--engine explicit` が閉じる前に `--explicit-budget` を超えた。または inline `implements Abs from "file" { }` seam の対応探索が固定の内部状態予算を超えた(`check`/`verify`、CLI フラグ無し) | explicit engine の場合: 予算を上げるか、この spec には `--engine bmc`/`induction` を使う。inline `implements` seam の場合: domain を縮めるか、結合検査ではなく `fslc refine`/`fslc verify` で層を分けて検証する |
 | `error` | parse / type / semantics / io | `loc` / `expected` / `hint` に従って直す |
 
 `--engine auto` は explicit と bmc を合成します: まず explicit を試し(より速く、
@@ -1209,8 +1209,8 @@ literate な `.md` はこの方法で `.fsl` ファイルを `use`/compose で�
 `analyze`・`diff`・`refine`・`replay`・`sweep`・`counterexample export`・
 `db check`/`observe`・`compat check`・`domain check`/`analyze`/`expand`/`generate`/`replay`/`testgen`・
 `ai check`/`replay`/`compat`・
-`causal check`/`analyze`/`diff`/`ledger`/`observe-expectations`/`verify-expectations`、および
-`document generate`/`claims`/`check`)は、`.md` 入力を代わりに入力種別の誤りとして
+`causal check`/`analyze`/`diff`/`ledger`/`observe-expectations`/`verify-expectations`、
+`document generate`/`claims`/`check`、および `approval create`/`check`/`diff`)は、`.md` 入力を代わりに入力種別の誤りとして
 拒否します: `result: "error"`、`kind: "usage"`、
 `diagnostic_code: "FSL-INPUT-LITERATE-UNSUPPORTED"`、対応コマンドを挙げたメッセージ、
 そして仕様上の位置ではなく入力ファイル自体を指す `loc` です。これにより、非対応
@@ -1218,11 +1218,11 @@ literate な `.md` はこの方法で `.fsl` ファイルを `use`/compose で�
 位置にある仕様の構文エラーとして誤報されることを防ぎます。`chain`(位置引数は
 プロジェクトマニフェストであり仕様ではない)と`db import`(位置引数は SQL/Prisma
 スキーマ成果物)は、この意味での仕様パスコマンドではありません。
-`approval create`は`spec.path`が`.md`のレコードを生成できません(実測:
-`approval create <.md> --kind requirements_document|ledger ...`はレコード
-書き込み前に`FSL-PARSE`で失敗)。`approval check`/`diff`はレコードの
-`spec.path`が位置引数と一致するとき位置引数を FSL 仕様としてパースし、同じ
-`1:2`の誤報を再現します(手作りレコードで実測); issue #980 まで除外。
+`approval create`/`check`/`diff` の位置引数は `--kind` に関わらず常に FSL 仕様として
+パースされます -- `--kind requirements_document` の下で正当に `.md` を受け取るのは
+`--artifact` であって位置引数ではありません -- そのため上記のガードは他の全登録
+コマンドと同様に、位置引数を解決した直後・`check`/`diff` が `--record` を読む前に
+適用されます(#980)。
 `ai eval`/`regress`/`drift`は独自の
 `load_ai_project` フロントエンドで `.md` を既にパースします(有効な literate AI
 project では成功し、それ以外は明確な意味エラー)ため、この変更の対象外です。各

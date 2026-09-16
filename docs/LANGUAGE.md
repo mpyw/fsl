@@ -799,7 +799,7 @@ variable.
 ## 7. The verifier `fslc`
 
 ```
-fslc check     <file.fsl|file.md>                  # syntax / names / types only (fast; .md = literate FSL)
+fslc check     <file.fsl|file.md>                  # syntax / names / types, and an inline implements block (depth-bounded, no Z3); .md = literate FSL
 fslc lint      <path>... [--edition current|next] [--project fsl-project.toml] # edition + ID-policy diagnostics; never mutates
 fslc migrate   <path>... --edition next [--write] # dry-run edits; --write applies validated set
 fslc fmt       <file.fsl|-> [--edition current|next] # canonical FSL to stdout; never mutates input
@@ -1042,9 +1042,8 @@ result; `imported`/`imported_with_warnings` is `fslc db import`'s. `impl_violate
 because inline `implements` propagates that seam verdict to the top-level `result`. The fold
 happens where the verification envelope is produced, so it is not confined to `check` and
 `verify`: on a spec whose seam fails, `mutate` re-emits the baseline verdict (generating no
-mutants, because its baseline is no longer `verified`), `ledger` inherits the same exit, and
-`sweep` reports `sweep_failed`. `fslc html` embeds the folded envelope; its exit code is
-unchanged. The same
+mutants, because its baseline is no longer `verified`), `ledger` and `fslc html` inherit the
+same exit from the folded verification envelope, and `sweep` reports `sweep_failed`. The same
 `2` mapping is fail-closed for `chain`'s project-manifest reader (unrecognized
 section, zero recognized sections, or an unparseable `depth`/`refine_depth` —
 `docs/DESIGN-layers.md` §7) and for `ledger --impl-log`'s replay input (a
@@ -1068,7 +1067,7 @@ records why, and why `fslc document check`'s `document_drifted` differs. Gate on
 | `violated` | A counterexample exists. Comes with `violation_kind` and the shortest trace | Read the trace and fix the spec |
 | `reachable_failed` | reachable not reached within depth K | Read each `unreached[].classification`: raise `--depth` for `insufficient_depth`, or fix the blocking constraint for `over_constrained` |
 | `unknown_cti` | The invariant is not violated but is not inductive | **Read the CTI and add an auxiliary invariant** (§8), or try `--engine explicit` (closure proves without lemmas) |
-| `unknown_budget` | `--engine explicit` exceeded `--explicit-budget` before closing | Raise the budget, or use `--engine bmc`/`induction` for this spec |
+| `unknown_budget` | Either: `--engine explicit` exceeded `--explicit-budget` before closing; or an inline `implements Abs from "file" { }` seam's correspondence search exceeded its fixed internal state budget (`check`/`verify`, no CLI flag) | For the explicit engine: raise the budget, or use `--engine bmc`/`induction` for this spec. For an inline `implements` seam: narrow the domain, or verify the layers separately with `fslc refine`/`fslc verify` instead of the combined check |
 | `error` | parse / type / semantics / io | Fix per `loc` / `expected` / `hint` |
 
 `--engine auto` composes explicit and bmc: it tries explicit first (faster,
@@ -1246,8 +1245,8 @@ this way. Most other commands that read a spec path (`lint`, `migrate`,
 `testplan`, `html`, `ledger`, `analyze`, `diff`, `refine`, `replay`, `sweep`, `counterexample export`,
 `db check`/`observe`, `compat check`, `domain check`/`analyze`/`expand`/`generate`/`replay`/`testgen`,
 `ai check`/`replay`/`compat`,
-`causal check`/`analyze`/`diff`/`ledger`/`observe-expectations`/`verify-expectations`, and
-`document generate`/`claims`/`check`) reject a `.md` input as an input-kind
+`causal check`/`analyze`/`diff`/`ledger`/`observe-expectations`/`verify-expectations`,
+`document generate`/`claims`/`check`, and `approval create`/`check`/`diff`) reject a `.md` input as an input-kind
 error instead: `result: "error"`, `kind: "usage"`,
 `diagnostic_code: "FSL-INPUT-LITERATE-UNSUPPORTED"`, a message naming the
 commands that do support literate input, and a `loc` that names the input
@@ -1256,12 +1255,12 @@ unsupported command from being misreported as a spec syntax error at the
 position of the Markdown's own first non-fsl character. `chain` (its
 positional is a project manifest, not a spec) and `db import` (its positional is
 a SQL/Prisma schema artifact) are not spec-path commands in this sense.
-`approval create` cannot produce a record whose `spec.path` is `.md` (measured:
-`approval create <.md> --kind requirements_document|ledger ...` fails with
-`FSL-PARSE` before any record is written). `approval check`/`diff` parse their
-positional as an FSL spec when the record's `spec.path` matches it and then
-reproduce the same `1:2` lie (measured with a hand-forged record); excluded
-pending issue #980. `ai eval`/`regress`/`drift`
+`approval create`/`check`/`diff`'s positional is always parsed as an FSL spec
+regardless of `--kind` -- `--kind requirements_document`'s legitimately
+`.md`-shaped input is `--artifact`, never the positional -- so the guard
+above applies to their positional the same way it does for every other
+registered command, checked immediately after the positional is resolved and
+before `check`/`diff` read `--record` (#980). `ai eval`/`regress`/`drift`
 already parse `.md` input through their own `load_ai_project` frontend
 (success on a valid literate AI project, a clean semantic error otherwise)
 and are unaffected by this change. See

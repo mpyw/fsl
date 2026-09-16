@@ -878,7 +878,7 @@ variable.</p></div></details>
 <li>A full <code>push</code> into a Seq is also detected automatically as <code>type_bound</code>
   (to guard it, write <code>requires q.size() &lt; N</code>).</li>
 </ul></div></details>
-<details id="7-the-verifier-fslc"><summary>7. The verifier `fslc`<span class="tree-blurb"> — The fslc CLI surface, result kinds, exit codes, coverage diagnosis.</span></summary><div class="tree-body"><pre><code>fslc check     &lt;file.fsl|file.md&gt;                  # syntax / names / types only (fast; .md = literate FSL)
+<details id="7-the-verifier-fslc"><summary>7. The verifier `fslc`<span class="tree-blurb"> — The fslc CLI surface, result kinds, exit codes, coverage diagnosis.</span></summary><div class="tree-body"><pre><code>fslc check     &lt;file.fsl|file.md&gt;                  # syntax / names / types, and an inline implements block (depth-bounded, no Z3); .md = literate FSL
 fslc lint      &lt;path&gt;... [--edition current|next] [--project fsl-project.toml] # edition + ID-policy diagnostics; never mutates
 fslc migrate   &lt;path&gt;... --edition next [--write] # dry-run edits; --write applies validated set
 fslc fmt       &lt;file.fsl|-&gt; [--edition current|next] # canonical FSL to stdout; never mutates input
@@ -1107,9 +1107,8 @@ result; <code>imported</code>/<code>imported_with_warnings</code> is <code>fslc 
 because inline <code>implements</code> propagates that seam verdict to the top-level <code>result</code>. The fold
 happens where the verification envelope is produced, so it is not confined to <code>check</code> and
 <code>verify</code>: on a spec whose seam fails, <code>mutate</code> re-emits the baseline verdict (generating no
-mutants, because its baseline is no longer <code>verified</code>), <code>ledger</code> inherits the same exit, and
-<code>sweep</code> reports <code>sweep_failed</code>. <code>fslc html</code> embeds the folded envelope; its exit code is
-unchanged. The same
+mutants, because its baseline is no longer <code>verified</code>), <code>ledger</code> and <code>fslc html</code> inherit the
+same exit from the folded verification envelope, and <code>sweep</code> reports <code>sweep_failed</code>. The same
 <code>2</code> mapping is fail-closed for <code>chain</code>'s project-manifest reader (unrecognized
 section, zero recognized sections, or an unparseable <code>depth</code>/<code>refine_depth</code> —
 <code>docs/DESIGN-layers.md</code> §7) and for <code>ledger --impl-log</code>'s replay input (a
@@ -1159,8 +1158,8 @@ records why, and why <code>fslc document check</code>'s <code>document_drifted</
 </tr>
 <tr>
 <td><code>unknown_budget</code></td>
-<td><code>--engine explicit</code> exceeded <code>--explicit-budget</code> before closing</td>
-<td>Raise the budget, or use <code>--engine bmc</code>/<code>induction</code> for this spec</td>
+<td>Either: <code>--engine explicit</code> exceeded <code>--explicit-budget</code> before closing; or an inline <code>implements Abs from "file" { }</code> seam's correspondence search exceeded its fixed internal state budget (<code>check</code>/<code>verify</code>, no CLI flag)</td>
+<td>For the explicit engine: raise the budget, or use <code>--engine bmc</code>/<code>induction</code> for this spec. For an inline <code>implements</code> seam: narrow the domain, or verify the layers separately with <code>fslc refine</code>/<code>fslc verify</code> instead of the combined check</td>
 </tr>
 <tr>
 <td><code>error</code></td>
@@ -1318,8 +1317,8 @@ this way. Most other commands that read a spec path (<code>lint</code>, <code>mi
 <code>testplan</code>, <code>html</code>, <code>ledger</code>, <code>analyze</code>, <code>diff</code>, <code>refine</code>, <code>replay</code>, <code>sweep</code>, <code>counterexample export</code>,
 <code>db check</code>/<code>observe</code>, <code>compat check</code>, <code>domain check</code>/<code>analyze</code>/<code>expand</code>/<code>generate</code>/<code>replay</code>/<code>testgen</code>,
 <code>ai check</code>/<code>replay</code>/<code>compat</code>,
-<code>causal check</code>/<code>analyze</code>/<code>diff</code>/<code>ledger</code>/<code>observe-expectations</code>/<code>verify-expectations</code>, and
-<code>document generate</code>/<code>claims</code>/<code>check</code>) reject a <code>.md</code> input as an input-kind
+<code>causal check</code>/<code>analyze</code>/<code>diff</code>/<code>ledger</code>/<code>observe-expectations</code>/<code>verify-expectations</code>,
+<code>document generate</code>/<code>claims</code>/<code>check</code>, and <code>approval create</code>/<code>check</code>/<code>diff</code>) reject a <code>.md</code> input as an input-kind
 error instead: <code>result: "error"</code>, <code>kind: "usage"</code>,
 <code>diagnostic_code: "FSL-INPUT-LITERATE-UNSUPPORTED"</code>, a message naming the
 commands that do support literate input, and a <code>loc</code> that names the input
@@ -1328,12 +1327,12 @@ unsupported command from being misreported as a spec syntax error at the
 position of the Markdown's own first non-fsl character. <code>chain</code> (its
 positional is a project manifest, not a spec) and <code>db import</code> (its positional is
 a SQL/Prisma schema artifact) are not spec-path commands in this sense.
-<code>approval create</code> cannot produce a record whose <code>spec.path</code> is <code>.md</code> (measured:
-<code>approval create &lt;.md&gt; --kind requirements_document|ledger ...</code> fails with
-<code>FSL-PARSE</code> before any record is written). <code>approval check</code>/<code>diff</code> parse their
-positional as an FSL spec when the record's <code>spec.path</code> matches it and then
-reproduce the same <code>1:2</code> lie (measured with a hand-forged record); excluded
-pending issue #980. <code>ai eval</code>/<code>regress</code>/<code>drift</code>
+<code>approval create</code>/<code>check</code>/<code>diff</code>'s positional is always parsed as an FSL spec
+regardless of <code>--kind</code> -- <code>--kind requirements_document</code>'s legitimately
+<code>.md</code>-shaped input is <code>--artifact</code>, never the positional -- so the guard
+above applies to their positional the same way it does for every other
+registered command, checked immediately after the positional is resolved and
+before <code>check</code>/<code>diff</code> read <code>--record</code> (#980). <code>ai eval</code>/<code>regress</code>/<code>drift</code>
 already parse <code>.md</code> input through their own <code>load_ai_project</code> frontend
 (success on a valid literate AI project, a clean semantic error otherwise)
 and are unaffected by this change. See

@@ -76,7 +76,7 @@ As needed: `fslc explain file.fsl --depth 8 --readable`
 ## 7. CLI and JSON essentials
 
 ```
-fslc check <f>                                  # syntax / names / types only; f = .fsl or .md (literate)
+fslc check <f>                                  # syntax / names / types, and an inline implements block (depth-bounded, no Z3); f = .fsl or .md (literate)
 fslc lint <path>... [--edition current|next] [--project fsl-project.toml] # edition + ID-policy findings; never mutates
                                                  # exit 0 no findings, 1 findings exist, 2 I/O or check failure (unconditional per input, refused legacy tokens excepted)
 fslc migrate <path>... --edition next [--write] # dry run by default; atomic validated write set
@@ -285,15 +285,16 @@ is not supported. Most other spec-reading commands (`lint`, `migrate`, `fmt`,
 `db check`/`observe`, `compat check`, `domain check`/`analyze`/`expand`/`generate`/`replay`/`testgen`,
 `ai check`/`replay`/`compat`,
 `causal check`/`analyze`/`diff`/`ledger`/`observe-expectations`/`verify-expectations`,
-`document generate`/`claims`/`check`) reject `.md` input as an input-kind
+`document generate`/`claims`/`check`, and `approval create`/`check`/`diff`) reject `.md` input as an input-kind
 error (`kind:"usage"`, `diagnostic_code:"FSL-INPUT-LITERATE-UNSUPPORTED"`,
 `loc` naming the input file, not a spec position) instead of handing it to
 the parser (issue #665). `chain` (project manifest, not a spec) and `db import`
 (SQL/Prisma schema artifact) are not spec-path commands in this sense.
-`approval create` cannot write a record whose `spec.path` is `.md`; when
-`approval check`/`diff` see a matching record they parse the positional as FSL
-and reproduce the `1:2` lie (measured with a forged record) -- excluded pending
-issue #980. `ai eval`/`regress`/`drift` already parse `.md` through `load_ai_project`
+`approval create`/`check`/`diff`'s positional is always parsed as an FSL spec
+regardless of `--kind` -- `--kind requirements_document`'s legitimately
+`.md`-shaped input is `--artifact`, never the positional -- so the guard above
+applies right after the positional is resolved, before `check`/`diff` read
+`--record` (issue #980). `ai eval`/`regress`/`drift` already parse `.md` through `load_ai_project`
 (valid literate AI project succeeds; otherwise a clean semantic error) and are
 unaffected. See `rust/fslc/src/literate_access.rs`'s `LITERATE_EXCLUDED`.
 

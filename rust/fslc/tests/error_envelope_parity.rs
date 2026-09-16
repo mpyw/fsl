@@ -92,7 +92,11 @@ enum LiterateCoverage {
     /// The command materializes Markdown and has success-path coverage
     /// elsewhere; it is not an error-envelope cell.
     Supported { reason: &'static str },
-    /// The `approval` commands' Markdown behavior is pinned until #980.
+    /// A registered command whose Markdown behavior is a known, temporary
+    /// asymmetry from the uniform envelope, tracked by a `KNOWN_ASYMMETRIES`
+    /// pin. #980 retired the last real user of this variant (the `approval`
+    /// commands); it remains for calibration coverage
+    /// (`missing_ai_parse_project_classification_is_rejected`).
     Pinned,
     /// Markdown is not a meaningful input for this command. The reason is
     /// required so a `SpecPath` command cannot silently opt out of this axis.
@@ -224,7 +228,7 @@ const PARITY_REGISTRY: &[CommandRegistration] = &[
                 APPROVAL_RECORD_PLACEHOLDER,
             ],
         },
-        literate: LiterateCoverage::Pinned,
+        literate: LiterateCoverage::UniformUnsupported,
         coverage: APPROVAL_CHECK_COVERAGE,
         not_applicable: &[],
     },
@@ -243,7 +247,7 @@ const PARITY_REGISTRY: &[CommandRegistration] = &[
                 "parity",
             ],
         },
-        literate: LiterateCoverage::Pinned,
+        literate: LiterateCoverage::UniformUnsupported,
         coverage: APPROVAL_CREATE_COVERAGE,
         not_applicable: &[],
     },
@@ -258,7 +262,7 @@ const PARITY_REGISTRY: &[CommandRegistration] = &[
                 APPROVAL_RECORD_PLACEHOLDER,
             ],
         },
-        literate: LiterateCoverage::Pinned,
+        literate: LiterateCoverage::UniformUnsupported,
         coverage: APPROVAL_DIFF_COVERAGE,
         not_applicable: &[],
     },
@@ -867,6 +871,13 @@ const APPROVAL_CREATE_INPUT_SHAPE_PROFILE: InputShapeProfile = InputShapeProfile
     parse: APPROVAL_CREATE_PARSE_INPUT_SHAPES,
     ..SOURCE_INPUT_SHAPE_PROFILE
 };
+/// `kernel` reaches the same AI-component frontend `check` does (issue
+/// #1015), so it needs the same `Component` Name-class population `check`
+/// declares in [`CHECK_NAME_INPUT_SHAPES`].
+const KERNEL_INPUT_SHAPE_PROFILE: InputShapeProfile = InputShapeProfile {
+    name: CHECK_NAME_INPUT_SHAPES,
+    ..SOURCE_INPUT_SHAPE_PROFILE
+};
 
 // This is the closed set of commands whose production dispatch distinguishes
 // fsl-ai component and project documents. It is intentionally not inferred
@@ -933,7 +944,7 @@ const INPUT_SHAPE_POPULATIONS: &[CommandInputShapePopulation] = &[
     input_shape_population!("explain", SOURCE_INPUT_SHAPE_PROFILE),
     input_shape_population!("fmt", SOURCE_INPUT_SHAPE_PROFILE),
     input_shape_population!("html", SOURCE_INPUT_SHAPE_PROFILE),
-    input_shape_population!("kernel", SOURCE_INPUT_SHAPE_PROFILE),
+    input_shape_population!("kernel", KERNEL_INPUT_SHAPE_PROFILE),
     input_shape_population!("ledger", SOURCE_INPUT_SHAPE_PROFILE),
     input_shape_population!("lint", SOURCE_INPUT_SHAPE_PROFILE),
     input_shape_population!("migrate", SOURCE_INPUT_SHAPE_PROFILE),
@@ -1492,6 +1503,16 @@ const KERNEL_GUARD_COVERAGE: &[FailureCoverage] = &[
         fixture: NAME_FIXTURE,
         uniform: SEMANTIC_UNIFORM,
     },
+    // issue #1015: `kernel` reaches `lower_ai_component` through the same
+    // shared lowering gate as `check`, so an authority block naming an
+    // undeclared tool must return the same envelope `check` already pins
+    // for this fixture in `CHECK_COVERAGE`, not panic before any JSON is
+    // written.
+    FailureCoverage {
+        class: FailureClass::Name,
+        fixture: AI_NAME_FIXTURE,
+        uniform: AI_UNKNOWN_TOOL_SEMANTIC,
+    },
 ];
 
 struct KnownAsymmetry {
@@ -1686,27 +1707,6 @@ const KNOWN_ASYMMETRIES: &[KnownAsymmetry] = &[
         SEMANTIC_WITHOUT_INPUT_PATH,
         "#780"
     ),
-    pin!(
-        FailureClass::Literate,
-        "approval check",
-        LITERATE_FIXTURE,
-        SEMANTIC_WITHOUT_INPUT_PATH_WITHOUT_LOCATION,
-        "#980"
-    ),
-    pin!(
-        FailureClass::Literate,
-        "approval create",
-        LITERATE_FIXTURE,
-        PARSE_UNIFORM,
-        "#980"
-    ),
-    pin!(
-        FailureClass::Literate,
-        "approval diff",
-        LITERATE_FIXTURE,
-        PARSE_UNIFORM,
-        "#980"
-    ),
 ];
 
 struct Actual {
@@ -1805,6 +1805,9 @@ fn coverage_input_shape(command: &str, fixture: &str) -> InputShape {
     }
     if command == "approval create" && fixture == PARSE_APPROVAL_REQUIREMENTS_DOCUMENT_FIXTURE {
         return InputShape::RequirementsDocument;
+    }
+    if command == "kernel" && fixture == AI_NAME_FIXTURE {
+        return InputShape::Component;
     }
     if is_ai_dispatch_command(command) {
         if fixture == PARSE_AI_PROJECT_FIXTURE
@@ -1934,7 +1937,7 @@ impl ApprovalFixture {
             "approval.json",
         ]);
         approval.write(
-            "spec.fsl",
+            approval_positional_name(fixture),
             &std::fs::read_to_string(workspace_root().join(fixture))
                 .unwrap_or_else(|error| panic!("read {fixture}: {error}")),
         );
@@ -2011,6 +2014,27 @@ fn require_test_git() {
 
 fn approval_command(command: &str) -> bool {
     command.starts_with("approval ")
+}
+
+/// The on-disk positional filename an approval fixture is written to.
+///
+/// `.fsl` fixtures keep the pre-existing `spec.fsl` name, matching the valid
+/// baseline `ApprovalFixture::new` already committed and recorded. A `.md`
+/// fixture (the Literate class) is written to a sibling `spec.md` instead of
+/// overwriting `spec.fsl`, so the positional this test invokes actually has
+/// the `.md` extension `literate_access` gates on -- overwriting `spec.fsl`'s
+/// *content* with Markdown left the on-disk file `.fsl`-named, which never
+/// reached the extension check this test exists to exercise (#980).
+fn approval_positional_name(fixture: &str) -> &'static str {
+    if Path::new(fixture)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        == Some("md")
+    {
+        "spec.md"
+    } else {
+        "spec.fsl"
+    }
 }
 
 fn invoke(
@@ -2098,7 +2122,13 @@ fn run(command: &str, fixture: &str) -> Actual {
             ParityScope::Excluded { .. } => false,
         };
         let record = needs_record.then_some(approval.record.as_path());
-        return run_from(command, fixture, "spec.fsl", record, &approval.root);
+        return run_from(
+            command,
+            fixture,
+            approval_positional_name(fixture),
+            record,
+            &approval.root,
+        );
     }
     run_from(command, fixture, fixture, None, &workspace_root())
 }
@@ -2211,7 +2241,7 @@ fn assert_cell(cell: Cell) {
     }
     let actual = run(cell.command, cell.fixture);
     let expected_input = if approval_command(cell.command) {
-        "spec.fsl"
+        approval_positional_name(cell.fixture)
     } else {
         cell.fixture
     };

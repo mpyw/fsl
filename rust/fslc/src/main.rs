@@ -1839,6 +1839,16 @@ fn approval_command(mut args: impl Iterator<Item = String>) -> Result<(Value, i3
         args.next()
             .ok_or_else(|| format!("fslc approval {subcommand} requires a spec"))?,
     );
+    // The positional is always parsed as an FSL spec regardless of `--kind`
+    // (`--kind requirements_document`'s legitimately `.md`-shaped input is
+    // `--artifact`, never the positional; #980). Gate immediately after
+    // resolving the positional and before any record is read, the same
+    // seam `document_command` uses.
+    if matches!(subcommand.as_str(), "create" | "check" | "diff")
+        && let Err(early_return) = literate_access(&format!("approval {subcommand}"), &path)
+    {
+        return Ok(early_return);
+    }
     match subcommand.as_str() {
         "create" => {
             let mut kind = None;
@@ -5757,6 +5767,23 @@ fn run_kernel_contract(path: &Path, version: fsl_core::PublicKernelVersion) -> (
         Ok(source) => source,
         Err(error) => return (spec_load_error_output(&error), 2),
     };
+    // `lower_ai_component` indexes `members[tool_name]` for every
+    // authority-block tool reference and panics if the tool is undeclared
+    // (issue #1015). Validate an `ai_component` document's authority names
+    // before lowering, the same way `run_check_from_source` does through
+    // `validate_specialized_document_from_source` — but narrowed to the AI
+    // frontend alone, so this stays scoped to the one lowering path that can
+    // panic and does not also start rejecting a `dbsystem` document `kernel`
+    // previously accepted (`validate_specialized_document_from_source` would
+    // additionally run `validate_db`, which `kernel` has never called). A
+    // parse failure or any other document kind falls through unchanged to
+    // `parse_kernel_source` below, keeping its own `kind:"parse"` envelope.
+    if let Ok(fsl_syntax::SurfaceDocument::AiComponent(component)) =
+        parse_surface_document_from_source(path, &source)
+        && let Err(error) = fsl_core::validate_ai_component(&component)
+    {
+        return (semantic_error_output(&error.to_string()), 2);
+    }
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     let resolver = fsl_core::FsResolver::new(base);
     let portable_path = if version == fsl_core::PublicKernelVersion::V2 {
@@ -5992,6 +6019,16 @@ fn strict_tag_warnings_from_source(
     }
 
     let referenced = referenced_requirement_ids(model, source);
+    // `Declared` = requirement-block IDs auto-collected from the requirements dialect
+    // (docs/DESIGN-strict-tags.md section 2 calls this "essential" for catching an
+    // empty block) union `--requirements` file IDs. Both halves run regardless of
+    // whether `--requirements` was passed; only the file half is optional. The file
+    // half keeps reporting in its original file-line order, so an established
+    // `--requirements` file's warning order is undisturbed; IDs that reach
+    // `Declared` only through auto-collection are reported afterward, in a fixed
+    // (sorted) order.
+    let declared_from_blocks = fsl_core::requirements_declared_ids(source).unwrap_or_default();
+    let mut declared_from_file: Vec<String> = Vec::new();
     if let Some(path) = requirements {
         let source = std::fs::read_to_string(path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -6000,20 +6037,37 @@ fn strict_tag_warnings_from_source(
                 error.to_string()
             }
         })?;
-        for requirement in source
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-        {
-            if !referenced.contains(requirement) {
-                warnings.push(json!({
-                    "kind": "unreferenced_requirement",
-                    "element": "requirement",
-                    "name": requirement,
-                    "loc": Value::Null,
-                    "hint": "no declaration tag, acceptance, or forbidden block references this requirement ID",
-                }));
-            }
+        declared_from_file.extend(
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    for requirement in &declared_from_file {
+        if !referenced.contains(requirement.as_str()) {
+            warnings.push(json!({
+                "kind": "unreferenced_requirement",
+                "element": "requirement",
+                "name": requirement,
+                "loc": Value::Null,
+                "hint": "no declaration tag, acceptance, or forbidden block references this requirement ID",
+            }));
+        }
+    }
+    for requirement in &declared_from_blocks {
+        if declared_from_file.iter().any(|line| line == requirement) {
+            continue;
+        }
+        if !referenced.contains(requirement.as_str()) {
+            warnings.push(json!({
+                "kind": "unreferenced_requirement",
+                "element": "requirement",
+                "name": requirement,
+                "loc": Value::Null,
+                "hint": "no declaration tag, acceptance, or forbidden block references this requirement ID",
+            }));
         }
     }
     Ok(warnings)
@@ -11756,7 +11810,7 @@ fn run_html_report_from_source(
         Ok(model) => model,
         Err(error) => return (spec_load_error_output(&error), 2),
     };
-    let (verification, _) = run_verify_from_source(
+    let (verification, verification_status) = run_verify_from_source(
         path,
         source,
         depth,
@@ -11787,7 +11841,7 @@ fn run_html_report_from_source(
         &verification,
         &fsl_tools::undecided_declarations(&model),
     );
-    generated_content_result(
+    let (result, status) = generated_content_result(
         "html_report",
         &model.name,
         format!(
@@ -11798,6 +11852,13 @@ fn run_html_report_from_source(
         ),
         &html,
         output_path,
+    );
+    if status != 0 {
+        return (result, status);
+    }
+    (
+        result,
+        mutate_exit_status(&verification, verification_status),
     )
 }
 
@@ -14928,28 +14989,36 @@ fn forbidden_diff_findings(
         .collect())
 }
 
-fn add_verify_items(scope: &mut ScopeBounds, items: &[fsl_syntax::VerifyItem]) {
+/// Source-level verify bounds, kept as unevaluated expressions. The `values`
+/// side is resolved against a built [`KernelModel`] by [`resolve_scope`],
+/// which is the single const-evaluation owner (`check`'s own model
+/// construction) instead of a second, AST-only fold.
+#[derive(Default)]
+struct RawScope {
+    instances: std::collections::BTreeMap<String, i64>,
+    values: std::collections::BTreeMap<String, (fsl_syntax::Expr, fsl_syntax::Expr)>,
+}
+
+fn add_verify_items(scope: &mut RawScope, items: &[fsl_syntax::VerifyItem]) {
     for item in items {
         match item {
             fsl_syntax::VerifyItem::Instances(name, value, _) => {
                 scope.instances.insert(name.clone(), *value);
             }
             fsl_syntax::VerifyItem::Values(name, lo, hi, _) => {
-                if let (fsl_syntax::Expr::Num(lo), fsl_syntax::Expr::Num(hi)) =
-                    (lo.as_ref(), hi.as_ref())
-                {
-                    scope.values.insert(name.clone(), (*lo, *hi));
-                }
+                scope
+                    .values
+                    .insert(name.clone(), (lo.as_ref().clone(), hi.as_ref().clone()));
             }
         }
     }
 }
 
-fn declared_scope(source: &str) -> ScopeBounds {
+fn declared_raw_scope(source: &str) -> RawScope {
     let Ok(document) = fsl_syntax::parse_surface_document(source) else {
-        return ScopeBounds::default();
+        return RawScope::default();
     };
-    let mut scope = ScopeBounds::default();
+    let mut scope = RawScope::default();
     let mut add_spec_item = |item: &fsl_syntax::SpecItem| {
         if let fsl_syntax::SpecItem::VerifyBounds { items, .. } = item {
             add_verify_items(&mut scope, items);
@@ -14987,6 +15056,34 @@ fn declared_scope(source: &str) -> ScopeBounds {
     scope
 }
 
+/// Resolve a source-level `values` bound against the model's own evaluated
+/// domain. A name the model gave a `TypeDef::Domain` (every declared
+/// `number` has one; see `dialect.rs`/`lib.rs` `SpecItem::Type` lowering)
+/// uses that evaluated `(lo, hi)`, the same integers `check` reports,
+/// regardless of whether the source expression was a literal, a named
+/// const, or `-1..HI`. A name absent from the model (issue #1058's
+/// undeclared-`values`-name territory, intentionally untouched here) keeps
+/// the prior literal-only fallback so that scope is unchanged.
+fn resolve_scope(raw: RawScope, model: &KernelModel) -> ScopeBounds {
+    let values = raw
+        .values
+        .into_iter()
+        .filter_map(|(name, (lo, hi))| {
+            if let Some(TypeDef::Domain { lo, hi, .. }) = model.types.get(&name) {
+                return Some((name, (*lo, *hi)));
+            }
+            if let (fsl_syntax::Expr::Num(lo), fsl_syntax::Expr::Num(hi)) = (&lo, &hi) {
+                return Some((name, (*lo, *hi)));
+            }
+            None
+        })
+        .collect();
+    ScopeBounds {
+        instances: raw.instances,
+        values,
+    }
+}
+
 fn public_scope(scope: &ScopeBounds) -> Value {
     json!({
         "instances":scope.instances,
@@ -15012,8 +15109,20 @@ fn run_diff(
         Ok(source) => source,
         Err(error) => return (error_output("io", &error.to_string()), 2),
     };
-    let old_scope = declared_scope(&old_source);
-    let new_scope = declared_scope(&new_source);
+    // The declared scope's `values` bounds are resolved against each spec's
+    // own built model (the same evaluator `check` uses for
+    // `SpecItem::Type`), not re-folded from the raw AST here, so a const
+    // bound compares and overrides the same way a literal one does.
+    let old_model_declared = match load_model(old) {
+        Ok(model) => model,
+        Err(error) => return (spec_load_error_output(&error), 2),
+    };
+    let new_model = match load_model(new) {
+        Ok(model) => model,
+        Err(error) => return (spec_load_error_output(&error), 2),
+    };
+    let old_scope = resolve_scope(declared_raw_scope(&old_source), &old_model_declared);
+    let new_scope = resolve_scope(declared_raw_scope(&new_source), &new_model);
     let scope_changed = old_scope != new_scope;
     let overrides = ScopeBounds {
         instances: new_scope
@@ -15029,17 +15138,13 @@ fn run_diff(
             .map(|(name, value)| (name.clone(), *value))
             .collect(),
     };
-    let old_model = match if scope_changed {
-        load_model_scoped(old, &overrides)
+    let old_model = if scope_changed {
+        match load_model_scoped(old, &overrides) {
+            Ok(model) => model,
+            Err(error) => return (spec_load_error_output(&error), 2),
+        }
     } else {
-        load_model(old)
-    } {
-        Ok(model) => model,
-        Err(error) => return (spec_load_error_output(&error), 2),
-    };
-    let new_model = match load_model(new) {
-        Ok(model) => model,
-        Err(error) => return (spec_load_error_output(&error), 2),
+        old_model_declared
     };
     let mapping_source = match mapping.map(std::fs::read_to_string).transpose() {
         Ok(source) => source,
@@ -16752,8 +16857,19 @@ fn load_kernel_model_from_source(
 ) -> Result<(KernelSpec, KernelModel), SpecLoadError> {
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     let resolver = fsl_core::FsResolver::new(base);
+    load_kernel_model_from_source_with_resolver(path, source, &resolver)
+}
+
+/// `load_kernel_model_from_source` with a caller-owned resolver, so a
+/// cache-key computation can observe the dependency reads (issue #1023) by
+/// passing a recording resolver instead of a plain `FsResolver`.
+fn load_kernel_model_from_source_with_resolver(
+    path: &Path,
+    source: &str,
+    resolver: &dyn fsl_core::FileResolver,
+) -> Result<(KernelSpec, KernelModel), SpecLoadError> {
     let kernel =
-        match fsl_core::parse_kernel_source_with_file(source, &resolver, path.to_string_lossy()) {
+        match fsl_core::parse_kernel_source_with_file(source, resolver, path.to_string_lossy()) {
             Ok(kernel) => kernel,
             Err(error) => return Err(kernel_load_error(source, &error)),
         };
