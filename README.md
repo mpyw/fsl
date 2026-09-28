@@ -86,6 +86,7 @@ procedure and the internal [`release` Agent Skill](.claude/skills/release/SKILL.
 ### With mise
 
 [mise](https://mise.jdx.dev/) installs both commands straight from the GitHub releases.
+You need mise 2026.6.4 or later, the first release with the `matching_regex` option.
 Put this in your `mise.toml`, then run `mise install`:
 
 ```toml
@@ -94,12 +95,14 @@ fslc     = "github:ymm-oss/fsl"
 fslc-lsp = "github:ymm-oss/fsl"
 
 [tools]
-fslc     = { version = "4.6.0", matching_regex = "^fslc-(macos|linux|windows)" }
-fslc-lsp = { version = "4.6.0", matching = "fslc-lsp" }
+fslc     = { version = "latest", matching_regex = "^fslc-(macos|linux|windows)" }
+fslc-lsp = { version = "latest", matching_regex = "^fslc-lsp-" }
 ```
 
-mise verifies the release checksum, the GitHub artifact attestations, and the SLSA
-provenance before installing.
+To make installs reproducible, replace `latest` with a release version. Give `fslc` and
+`fslc-lsp` the same version.
+
+mise checks each download against the release checksum before installing.
 
 One repository publishes both commands, so each command needs its own alias under
 `[tool_alias]`. Two `[tools]` entries naming the same backend resolve to one install
